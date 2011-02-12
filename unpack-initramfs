@@ -5,82 +5,170 @@
 # The problem with that script is that the gzip magic number occasionally occur 
 # naturally, meaning that some non-compressed files get uncompressed.
 
-reset
 
 DEBUG=1
+TEMP_DIR=/tmp
+KERNEL_FILE=kernel
+INITRAMFS_FILE=initramfs.cpio
+INITRAMFS_DIR=initramfs_root
 
 
-
-
+# DO NOT MODIFY BELOW THIS LINE
 zImage=$1
-compression_type=$2
 
-case $2 in
-    bzip2)
-        compress='\x{5D}\x{00}\x..\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}\x{ FF}';;
+function pre_clean()
+{
+    [ -z $DEBUG ] || echo "-D- Function: pre_clean()"
+    [ -e $INITRAMFS_FILE ] && ( [ -z $DEBUG ] || echo "-D- Deleting $INITRAMFS_FILE"; rm -f $INITRAMFS_FILE )
+    [ -e $INITRAMFS_DIR ] && ( [ -z $DEBUG ] || echo "-D- Deleting $INITRAMFS_DIR"; rm -rf $INITRAMFS_DIR )
+    [ -z $DEBUG ] || echo
+}
 
-    gzip)
-        compress='\x1F\x8B\x08';;
+function ungzip_kernel()
+{
+    #========================================================
+    # find start of gziped kernel object in the zImage file:
+    #========================================================
+    [ -z $DEBUG ] || echo "-D- Function: ungzip_kernel()"
 
-    lzma)
-        compress='\x{5D}\x{00}\x..\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}';;
+    pos=`grep -P -a -b -m 1 --only-matching '\x1F\x8B\x08' $zImage | cut -f 1 -d :`
+    echo "-I- Extracting gzip'd kernel image from \"$zImage\" (start = $pos)"
 
-    *) compress='\x1F\x8B\x08';;
-esac
+    if [ ! $pos = "" ]; then
+        dd if=$zImage of=${TEMP_DIR}/kernel.gz bs=1 skip=$pos 2>/dev/null >/dev/null
+        gunzip -qf $TEMP_DIR/kernel.gz
+        inputfile=$KERNEL_FILE
+    else
+        echo "-E- Compressed kernel image not found"; exit 1
+    fi
+    [ -z $DEBUG ] || echo
+}
+
+function search_cpio()
+{
+    #========================================================
+    # Determine cpio compression type:
+    #========================================================
+    [ -z $DEBUG ] || echo "-D- Function: search_cpio()"
+
+    for x in gzip bzip2 lzma nocompression; do
+        case $x in
+            bzip2)
+                compress='\x{31}\x{41}\x{59}\x{26}\x{53}\x{59}'
+                cmd='bunzip2 -q'
+                ;;
+
+            gzip)
+                compress='\x1F\x8B\x08'
+                cmd='gunzip -q'
+                ;;
+
+            lzma)
+                compress='\x{5D}\x{00}\x..\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}'
+                cmd='unlzma -q'
+                ;;
+
+            nocompression)
+                compress=
+                cmd=
+                ;;
+        esac
+
+        #========================================================================
+        # Search for compressed cpio archive
+        #========================================================================
+        if [ ! compress = "nocompression" ]; then
+            pos="`grep -P -a -b -m 1 --only-matching "${compress}" /$TEMP_DIR/${inputfile} | cut -f 1 -d :`"
+
+            if [ ! -z $pos ]; then
+                [ -z $DEBUG ] || echo '-D- pos=`grep -P -a -b -m 1 --only-matching '"${compress}"' '$TEMP_DIR/${inputfile}' | cut -f 1 -d :`'
+                cpio_compressed_start=$pos
+                uncompress_cmd=$cmd
+                [ compress = "bzip2" ] && cpio_compressed_start=$((cpio_compressed_start - 4))
+                echo "-I- CPIO compression type = $x | pos = $cpio_compressed_start"
+            fi
+        else
+            [ -z $DEBUG ] || echo "-D- Compression type = $x"
+        fi
+    done 
+    [ -z $DEBUG ] || echo
+}
+
+function uncompress_cpio()
+{
+    [ -z $DEBUG ] || echo "-D- Function: uncompress_cpio()"
+
+    if [ ! compress = "nocompression" ]; then
+        echo "-I- Extracting compressed CPIO image from kernel image (start = $cpio_compressed_start)"
+
+        [ -z $DEBUG ] || echo "-D- dd if=$TEMP_DIR/${inputfile} bs=1 skip=$cpio_compressed_start | $uncompress_cmd > $TEMP_DIR/cpio.img"
+        dd if=$TEMP_DIR/${inputfile} bs=1 skip=$cpio_compressed_start | $uncompress_cmd > $TEMP_DIR/$INITRAMFS_FILE
+        inputfile=$INITRAMFS_FILE
+    fi
+    [ -z $DEBUG ] || echo
+}
+
+function extract_cpio()
+{
+    #==========================================================================
+    # find start and end of the "cpio" initramfs image inside the kernel object:
+    # ASCII cpio header starts with '070701'
+    # The end of the cpio archive is marked with an empty file named TRAILER!!!
+    #==========================================================================
+    [ -z $DEBUG ] || echo "-D- Function: extract_cpio()"
+
+    start=`grep -a -b -m 1 --only-matching '070701' $TEMP_DIR/${inputfile} | head -1 | cut -f 1 -d :`
+    end=`grep -a -b -m 1 --only-matching 'TRAILER!!!' $TEMP_DIR/${inputfile} | head -1 | cut -f 1 -d :`
 
 
-#========================================================
-# find start of gziped kernel object in the zImage file:
-#========================================================
-pos=`grep -P -a -b -m 1 --only-matching '\x1F\x8B\x08' $zImage | cut -f 1 -d :`
-echo "-I- Extracting gzip'd kernel image from \"$zImage\" (start = $pos)"
+    if [ ! -z $start ] || [ ! -z $end ]; then
+        #11 bytes = length of TRAILER!!! zero terminated string, fixes premature end of file warning in CPIO
+        end=$((end + 14))
+        [ -z $DEBUG ] || echo "-D- Kernel start = $start"
+        [ -z $DEBUG ] || echo "-D- Kernel end = $end"
+        count=$((end - start))
 
-if [ ! $pos = "" ]; then
-    dd if=$zImage of=/tmp/kernel.gz bs=1 skip=$pos 2>/dev/null >/dev/null
-    gunzip -qf /tmp/kernel.gz
-    inputfile=kernel
-else
-    echo "-E- $2'd kernel image not found"; exit 1
-fi
+        if (($count < 0)); then
+            echo "-E- Couldn't match start/end of the initramfs image."
+            exit 1
+        fi
+
+        echo "-I- Extracting initramfs image from $inputfile (start = $start, end = $end)"
+        dd if=$TEMP_DIR/$inputfile of=$INITRAMFS_FILE bs=1 skip=$start count=$count 2>/dev/null >/dev/null
+    else
+        
+        echo "-E- No CPIO image found in $inputfile"
+    fi
+    [ -z $DEBUG ] || echo
+}
+
+function expand_cpio_archive()
+{
+    [ -z $DEBUG ] || echo "-D- Function: expand_cpio_archive()"
+
+    if [ -e $INITRAMFS_FILE ]; then
+        mkdir $INITRAMFS_DIR
+        cd $INITRAMFS_DIR
+        cpio --quiet -i --no-absolute-filenames -F ../$INITRAMFS_FILE >/dev/null
+    fi
+    [ -z $DEBUG ] || echo
+}
+
+function clean_up()
+{
+    rm -f $TEMP_DIR/$KERNEL_FILE
+    rm -f $TEMP_DIR/${inputfile}
+}
 
 
-#==========================================================================
-# find start and end of the "cpio" initramfs image inside the kernel object:
-# ASCII cpio header starts with '070701'
-# The end of the cpio archive is marked with an empty file named TRAILER!!!
-#==========================================================================
-start="`grep -a -b -m 1 --only-matching '070701' /tmp/${inputfile} | head -1 | cut -f 1 -d :`"
-end="`grep -a -b -m 1 --only-matching 'TRAILER!!!' /tmp/${inputfile} | head -1 | cut -f 1 -d :`"
 
 
-[ -z $DEBUG ] || echo "-I- Kernel start = $start"
-[ -z $DEBUG ] || echo "-I- Kernel end = $end"
 
-if [ -z $start ] || [ -z $end ]; then
-   #========================================================================
-   # No cpio archive found, assuming compressed
-   #========================================================================
-   echo "-I- Extracting compressed cpio image from kernel image (start = $pos)"
-   pos=`grep -P -a -b -m 1 --only-matching "${compress}" /tmp/${inputfile} | cut -f 1 -d :`
-
-   [ -z $DEBUG ] || echo "dd if=/tmp/${inputfile} bs=1 skip=$pos | gunzip -q > /tmp/cpio.img"
-   dd if=/tmp/${inputfile} bs=1 skip=$pos | gunzip -q > /tmp/cpio.img
-   inputfile=cpio.img
-
-   start=`grep -a -b -m 1 --only-matching '070701' /tmp/${inputfile} | head -1 | cut -f 1 -d :`
-   end=`grep -a -b -m 1 --only-matching 'TRAILER!!!' /tmp/${inputfile} | head -1 | cut -f 1 -d :`
-
-else
-    echo "-I- Already uncompressed cpio.img, not decompressing"
-
-fi   
-
-end=$((end + 10))
-count=$((end - start))
-if (($count < 0)); then
-    echo "-E- Couldn't match start/end of the initramfs image."
-    exit
-fi
-
-echo "-I- Extracting initramfs image from $inputfile (start = $start, end = $end)"
-dd if=/tmp/$inputfile bs=1 skip=$start count=$count > initramfs.cpio
+reset
+pre_clean
+ungzip_kernel
+search_cpio
+uncompress_cpio
+extract_cpio
+expand_cpio_archive
+clean_up
