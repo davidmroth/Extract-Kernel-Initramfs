@@ -86,7 +86,7 @@ function search_cpio()
                 uncompress_cmd=$cmd
                 compression_type=$x
 
-                [ -z $DEBUG ] || echo '-D- Checking compression signiture | pos=`grep -P -a -b -m 1 --only-matching '"${compress}"' '$TEMP_DIR/${inputfile}' | cut -f 1 -d :`'
+                [ -z $DEBUG ] || echo '-D- Checking compression signature | pos=`grep -P -a -b -m 1 --only-matching '"${compress}"' '$TEMP_DIR/${inputfile}' | cut -f 1 -d :`'
                 [ compress = "bzip2" ] && cpio_compressed_start=$((cpio_compressed_start - 4))
             fi
         fi
