@@ -6,15 +6,16 @@
 # naturally, meaning that some non-compressed files get uncompressed.
 
 
-DEBUG=1
+DEBUG=
 TEMP_DIR=/tmp
 KERNEL_FILE=kernel
 INITRAMFS_FILE=initramfs.cpio
 INITRAMFS_DIR=initramfs_root
 
-
 # DO NOT MODIFY BELOW THIS LINE
-zImage=$1
+[ -z $1 ] && exit 1 || zImage=$1
+[ ! -e $1 ] && exit 1
+
 
 function pre_clean()
 {
@@ -34,7 +35,7 @@ function ungzip_kernel()
     pos=`grep -P -a -b -m 1 --only-matching '\x1F\x8B\x08' $zImage | cut -f 1 -d :`
     echo "-I- Extracting gzip'd kernel image from \"$zImage\" (start = $pos)"
 
-    if [ ! $pos = "" ]; then
+    if [ ! -z $pos ]; then
         dd if=$zImage of=${TEMP_DIR}/kernel.gz bs=1 skip=$pos 2>/dev/null >/dev/null
         gunzip -qf $TEMP_DIR/kernel.gz
         inputfile=$KERNEL_FILE
@@ -51,10 +52,10 @@ function search_cpio()
     #========================================================
     [ -z $DEBUG ] || echo "-D- Function: search_cpio()"
 
-    for x in gzip bzip2 lzma nocompression; do
+    for x in gzip bzip2 lzma none; do
         case $x in
             bzip2)
-                compress='\x{31}\x{41}\x{59}\x{26}\x{53}\x{59}'
+                compress='\x{42}\x{5A}\x{68}\x{39}\x{31}\x{41}\x{59}\x{26}\x{53}\x{59}'
                 cmd='bunzip2 -q'
                 ;;
 
@@ -68,8 +69,8 @@ function search_cpio()
                 cmd='unlzma -q'
                 ;;
 
-            nocompression)
-                compress=
+            none)
+                compress='070701'
                 cmd=
                 ;;
         esac
@@ -77,20 +78,21 @@ function search_cpio()
         #========================================================================
         # Search for compressed cpio archive
         #========================================================================
-        if [ ! compress = "nocompression" ]; then
-            pos="`grep -P -a -b -m 1 --only-matching "${compress}" /$TEMP_DIR/${inputfile} | cut -f 1 -d :`"
+        pos=`grep -P -a -b -m 1 --only-matching "${compress}" /$TEMP_DIR/${inputfile} | cut -f 1 -d :`
 
-            if [ ! -z $pos ]; then
-                [ -z $DEBUG ] || echo '-D- pos=`grep -P -a -b -m 1 --only-matching '"${compress}"' '$TEMP_DIR/${inputfile}' | cut -f 1 -d :`'
+        if [ ! -z $pos ]; then
+            if [ ! $pos -gt ${cpio_compressed_start:-0} ] || [ ${cpio_compressed_start:-0} -eq 0 ]; then
                 cpio_compressed_start=$pos
                 uncompress_cmd=$cmd
+                compression_type=$x
+
+                [ -z $DEBUG ] || echo '-D- Checking compression signiture | pos=`grep -P -a -b -m 1 --only-matching '"${compress}"' '$TEMP_DIR/${inputfile}' | cut -f 1 -d :`'
                 [ compress = "bzip2" ] && cpio_compressed_start=$((cpio_compressed_start - 4))
-                echo "-I- CPIO compression type = $x | pos = $cpio_compressed_start"
             fi
-        else
-            [ -z $DEBUG ] || echo "-D- Compression type = $x"
         fi
     done 
+
+    echo "-I- CPIO compression type detected = $compression_type | pos = $cpio_compressed_start"
     [ -z $DEBUG ] || echo
 }
 
@@ -98,8 +100,8 @@ function uncompress_cpio()
 {
     [ -z $DEBUG ] || echo "-D- Function: uncompress_cpio()"
 
-    if [ ! compress = "nocompression" ]; then
-        echo "-I- Extracting compressed CPIO image from kernel image (start = $cpio_compressed_start)"
+    if [ ! $compression_type = "no" ]; then
+        echo "-I- Extracting CPIO image from kernel image compressed using $compression_type (start = $cpio_compressed_start)"
 
         [ -z $DEBUG ] || echo "-D- dd if=$TEMP_DIR/${inputfile} bs=1 skip=$cpio_compressed_start | $uncompress_cmd > $TEMP_DIR/cpio.img"
         dd if=$TEMP_DIR/${inputfile} bs=1 skip=$cpio_compressed_start | $uncompress_cmd > $TEMP_DIR/$INITRAMFS_FILE
@@ -145,11 +147,12 @@ function extract_cpio()
 function expand_cpio_archive()
 {
     [ -z $DEBUG ] || echo "-D- Function: expand_cpio_archive()"
+    echo "-I- Expanding CPIO archive"
 
     if [ -e $INITRAMFS_FILE ]; then
         mkdir $INITRAMFS_DIR
         cd $INITRAMFS_DIR
-        cpio --quiet -i --no-absolute-filenames -F ../$INITRAMFS_FILE >/dev/null
+        cpio --quiet -i --make-directories --preserve-modification-time --no-absolute-filenames -F ../$INITRAMFS_FILE 2>/dev/null
     fi
     [ -z $DEBUG ] || echo
 }
