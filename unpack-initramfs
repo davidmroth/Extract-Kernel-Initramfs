@@ -6,9 +6,10 @@
 # naturally, meaning that some non-compressed files get uncompressed.
 
 
-DEBUG=
+DEBUG=1
 TEMP_DIR=/tmp
 KERNEL_FILE=kernel
+KERNEL_GZIP_FILE=kernel.gz
 INITRAMFS_FILE=initramfs.cpio
 INITRAMFS_DIR=initramfs_root
 
@@ -16,6 +17,8 @@ INITRAMFS_DIR=initramfs_root
 [ -z $1 ] && exit 1 || zImage=$1
 [ ! -e $1 ] && exit 1
 
+#GET CURRENT DIR
+CURRENT_DIR=`pwd`
 
 function pre_clean()
 {
@@ -33,12 +36,11 @@ function ungzip_kernel()
     [ -z $DEBUG ] || echo "-D- Function: ungzip_kernel()"
 
     pos=`grep -P -a -b -m 1 --only-matching '\x1F\x8B\x08' $zImage | cut -f 1 -d :`
-    echo "-I- Extracting gzip'd kernel image from \"$zImage\" (start = $pos)"
+    echo "-I- Extracting gzip'd kernel image from file: $zImage (start = $pos)"
 
     if [ ! -z $pos ]; then
-        dd if=$zImage of=${TEMP_DIR}/kernel.gz bs=1 skip=$pos 2>/dev/null >/dev/null
-        gunzip -qf $TEMP_DIR/kernel.gz
-        inputfile=$KERNEL_FILE
+        dd if=$zImage of=$TEMP_DIR/$KERNEL_GZIP_FILE bs=1 skip=$pos 2>/dev/null >/dev/null
+        gunzip -qf $TEMP_DIR/$KERNEL_GZIP_FILE
     else
         echo "-E- Compressed kernel image not found"; exit 1
     fi
@@ -52,94 +54,113 @@ function search_cpio()
     #========================================================
     [ -z $DEBUG ] || echo "-D- Function: search_cpio()"
 
-    for x in gzip bzip2 lzma none; do
+    count=0
+    for x in gzip bzip lzma none; do
         case $x in
-            bzip2)
-                compress='\x{42}\x{5A}\x{68}\x{39}\x{31}\x{41}\x{59}\x{26}\x{53}\x{59}'
-                cmd='bunzip2 -q'
+            bzip)
+                csig='\x{31}\x{41}\x{59}\x{26}\x{53}\x{59}'
+                ucmd='bunzip2 -q'
+                fext='.bz2'
                 ;;
 
             gzip)
-                compress='\x1F\x8B\x08'
-                cmd='gunzip -q'
+                csig='\x1F\x8B\x08'
+                ucmd='gunzip -q'
+                fext='.gz'
                 ;;
 
             lzma)
-                compress='\x{5D}\x{00}\x..\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}'
-                cmd='unlzma -q'
+                csig='\x{5D}\x{00}\x..\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}'
+                ucmd='unlzma -q'
+                fext='.lmza'
                 ;;
 
             none)
-                compress='070701'
-                cmd=
+                csig='070701'
+                ucmd=
+                fext=
                 ;;
         esac
 
         #========================================================================
         # Search for compressed cpio archive
         #========================================================================
-        pos=`grep -P -a -b -m 1 --only-matching "${compress}" /$TEMP_DIR/${inputfile} | cut -f 1 -d :`
+        search=`grep -P -a -b -m 1 --only-matching $csig $TEMP_DIR/$KERNEL_FILE | cut -f 1 -d : | head -1`
+        pos=${search:-0}
 
-        if [ ! -z $pos ]; then
-            if [ ! $pos -gt ${cpio_compressed_start:-0} ] || [ ${cpio_compressed_start:-0} -eq 0 ]; then
-                cpio_compressed_start=$pos
-                uncompress_cmd=$cmd
-                compression_type=$x
+        [ -z $DEBUG ] || echo "-D- Is true: [ ${pos} -lt ${cpio_compressed_start:-0} ] || [ $count -eq 0 ]"
+        if [ ${pos} -gt 0 ] && [ ${pos} -lt ${cpio_compressed_start:-0} ] || [ $count -eq 0 ];then
+            cpio_compressed_start=$pos
 
-                [ -z $DEBUG ] || echo '-D- Checking compression signature | pos=`grep -P -a -b -m 1 --only-matching '"${compress}"' '$TEMP_DIR/${inputfile}' | cut -f 1 -d :`'
-                [ compress = "bzip2" ] && cpio_compressed_start=$((cpio_compressed_start - 4))
-            fi
+            compression_name=$x
+            compression_signature=$csig
+            uncompress_cmd=$ucmd
+            file_ext=$fext
+
+            [ -z $DEBUG ] || echo -e "-D- Checking for compression type: $compression_name | signature: $compression_signature | in file: $TEMP_DIR/$KERNEL_FILE | offset = $pos\n\n"
         fi
+        ((count++))
     done 
 
-    echo "-I- CPIO compression type detected = $compression_type | pos = $cpio_compressed_start"
-    [ -z $DEBUG ] || echo
-}
-
-function uncompress_cpio()
-{
-    [ -z $DEBUG ] || echo "-D- Function: uncompress_cpio()"
-
-    if [ ! $compression_type = "no" ]; then
-        echo "-I- Extracting CPIO image from kernel image compressed using $compression_type (start = $cpio_compressed_start)"
-
-        [ -z $DEBUG ] || echo "-D- dd if=$TEMP_DIR/${inputfile} bs=1 skip=$cpio_compressed_start | $uncompress_cmd > $TEMP_DIR/cpio.img"
-        dd if=$TEMP_DIR/${inputfile} bs=1 skip=$cpio_compressed_start | $uncompress_cmd > $TEMP_DIR/$INITRAMFS_FILE
-        inputfile=$INITRAMFS_FILE
-    fi
+    [ $compression_name = "bzip" ] && cpio_compressed_start=$((cpio_compressed_start - 4))
+    echo "-I- CPIO compression type detected = $compression_name | offset = $cpio_compressed_start"
     [ -z $DEBUG ] || echo
 }
 
 function extract_cpio()
+{
+    [ -z $DEBUG ] || echo "-D- Function: extract_cpio()"
+
+    if [ ! $compression_name = "none" ]; then
+        echo "-I- Extracting $compression_name'd compressed CPIO image from kernel image (offset = $cpio_compressed_start)"
+        [ -z $DEBUG ] || echo "-D- dd if=$TEMP_DIR/$KERNEL_FILE of=$TEMP_DIR/$INITRAMFS_FILE$file_ext bs=1 skip=$cpio_compressed_start; $uncompress_cmd $TEMP_DIR/$INITRAMFS_FILE$file_ext"
+        dd if=$TEMP_DIR/$KERNEL_FILE of=$TEMP_DIR/$INITRAMFS_FILE$file_ext bs=1 skip=$cpio_compressed_start 2>/dev/null >/dev/null
+        $uncompress_cmd -q $TEMP_DIR/$INITRAMFS_FILE$file_ext
+
+    else
+        echo "-I- Extracting non-compressed CPIO image from kernel image (offset = $cpio_compressed_start)"
+        [ -z $DEBUG ] || echo "-D- dd if=$TEMP_DIR/$KERNEL_FILE of=$TEMP_DIR/${INITRAMFS_FILE}${file_ext} bs=1 skip=$cpio_compressed_start 2>/dev/null >/dev/null"
+        dd if=$TEMP_DIR/$KERNEL_FILE of=$TEMP_DIR/${INITRAMFS_FILE}${file_ext} bs=1 skip=$cpio_compressed_start 2>/dev/null >/dev/null
+    fi
+
+    [ -z $DEBUG ] || echo
+}
+
+function uncompress_cpio()
 {
     #==========================================================================
     # find start and end of the "cpio" initramfs image inside the kernel object:
     # ASCII cpio header starts with '070701'
     # The end of the cpio archive is marked with an empty file named TRAILER!!!
     #==========================================================================
-    [ -z $DEBUG ] || echo "-D- Function: extract_cpio()"
+    [ -z $DEBUG ] || echo "-D- Function: uncompress_cpio()"
 
-    start=`grep -a -b -m 1 --only-matching '070701' $TEMP_DIR/${inputfile} | head -1 | cut -f 1 -d :`
-    end=`grep -a -b -m 1 --only-matching 'TRAILER!!!' $TEMP_DIR/${inputfile} | head -1 | cut -f 1 -d :`
+    if [ ! $compress_type = "none" ]; then
+        start=`grep -a -b -m 1 --only-matching '070701' $TEMP_DIR/$INITRAMFS_FILE | head -1 | cut -f 1 -d :`
+        end=`grep -a -b -m 1 --only-matching 'TRAILER!!!' $TEMP_DIR/$INITRAMFS_FILE | head -1 | cut -f 1 -d :`
 
+        if [ ! -z $start ] || [ ! -z $end ]; then
+            #11 bytes = length of TRAILER!!! zero terminated string, fixes premature end of file warning in CPIO
+            end=$((end + 14))
+            [ -z $DEBUG ] || echo "-D- Kernel start = $start"
+            [ -z $DEBUG ] || echo "-D- Kernel end = $end"
+            count=$((end - start))
 
-    if [ ! -z $start ] || [ ! -z $end ]; then
-        #11 bytes = length of TRAILER!!! zero terminated string, fixes premature end of file warning in CPIO
-        end=$((end + 14))
-        [ -z $DEBUG ] || echo "-D- Kernel start = $start"
-        [ -z $DEBUG ] || echo "-D- Kernel end = $end"
-        count=$((end - start))
+            if (($count < 0)); then
+                echo "-E- Couldn't match start/end of the initramfs image."
+                exit 1
+            fi
 
-        if (($count < 0)); then
-            echo "-E- Couldn't match start/end of the initramfs image."
-            exit 1
-        fi
-
-        echo "-I- Extracting initramfs image from $inputfile (start = $start, end = $end)"
-        dd if=$TEMP_DIR/$inputfile of=$INITRAMFS_FILE bs=1 skip=$start count=$count 2>/dev/null >/dev/null
-    else
+            echo "-I- Extracting initramfs image from file: $inputfile (start = $start, end = $end)"
+            dd if=$TEMP_DIR/$INITRAMFS_FILE of=$CURRENT_DIR/$INITRAMFS_FILE bs=1 skip=$start count=$count 2>/dev/null >/dev/null
+            INITRAMFS_FILE=$CURRENT_DIR/$INITRAMFS_FILE
+        else
         
-        echo "-E- No CPIO image found in $inputfile"
+            echo "-E- No CPIO image found in $inputfile."
+        fi
+    else
+        INITRAMFS_FILE=$TEMP_DIR/$INITRAMFS_FILE
+        echo "-I- CPIO alread uncompressed."
     fi
     [ -z $DEBUG ] || echo
 }
@@ -147,12 +168,12 @@ function extract_cpio()
 function expand_cpio_archive()
 {
     [ -z $DEBUG ] || echo "-D- Function: expand_cpio_archive()"
-    echo "-I- Expanding CPIO archive"
+    echo "-I- Expanding CPIO archive: $INITRAMFS_FILE to $INITRAMFS_DIR."
 
     if [ -e $INITRAMFS_FILE ]; then
         mkdir $INITRAMFS_DIR
         cd $INITRAMFS_DIR
-        cpio --quiet -i --make-directories --preserve-modification-time --no-absolute-filenames -F ../$INITRAMFS_FILE 2>/dev/null
+        cpio --quiet -i --make-directories --preserve-modification-time --no-absolute-filenames -F $INITRAMFS_FILE 2>/dev/null
     fi
     [ -z $DEBUG ] || echo
 }
@@ -160,7 +181,7 @@ function expand_cpio_archive()
 function clean_up()
 {
     rm -f $TEMP_DIR/$KERNEL_FILE
-    rm -f $TEMP_DIR/${inputfile}
+    rm -f $TEMP_DIR/$INITRAMFS_FILE
 }
 
 
@@ -171,7 +192,7 @@ reset
 pre_clean
 ungzip_kernel
 search_cpio
-uncompress_cpio
 extract_cpio
+uncompress_cpio
 expand_cpio_archive
 clean_up
