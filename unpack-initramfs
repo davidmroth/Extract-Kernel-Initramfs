@@ -6,7 +6,7 @@
 # naturally, meaning that some non-compressed files get uncompressed.
 
 
-DEBUG=1
+DEBUG=
 TEMP_DIR=/tmp
 KERNEL_FILE=kernel
 KERNEL_GZIP_FILE=kernel.gz
@@ -54,7 +54,6 @@ function search_cpio()
     #========================================================
     [ -z $DEBUG ] || echo "-D- Function: search_cpio()"
 
-    count=0
     for x in gzip bzip lzma none; do
         case $x in
             bzip)
@@ -72,7 +71,7 @@ function search_cpio()
             lzma)
                 csig='\x{5D}\x{00}\x..\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}\x{FF}'
                 ucmd='unlzma -q'
-                fext='.lmza'
+                fext='.lzma'
                 ;;
 
             none)
@@ -88,22 +87,23 @@ function search_cpio()
         search=`grep -P -a -b -m 1 --only-matching $csig $TEMP_DIR/$KERNEL_FILE | cut -f 1 -d : | head -1`
         pos=${search:-0}
 
-        [ -z $DEBUG ] || echo "-D- Is true: [ ${pos} -lt ${cpio_compressed_start:-0} ] || [ $count -eq 0 ]"
-        if [ ${pos} -gt 0 ] && [ ${pos} -lt ${cpio_compressed_start:-0} ] || [ $count -eq 0 ];then
-            cpio_compressed_start=$pos
+        if [ ${pos} -gt 0 ]; then
+            if [ ${pos} -le ${cpio_compressed_start:-0} ] || [ -z $cpio_compressed_start ];then
+                cpio_compressed_start=$pos
 
-            compression_name=$x
-            compression_signature=$csig
-            uncompress_cmd=$ucmd
-            file_ext=$fext
+                compression_name=$x
+                compression_signature=$csig
+                uncompress_cmd=$ucmd
+                file_ext=$fext
 
-            [ -z $DEBUG ] || echo -e "-D- Checking for compression type: $compression_name | signature: $compression_signature | in file: $TEMP_DIR/$KERNEL_FILE | offset = $pos\n\n"
+                [ -z $DEBUG ] || echo "-D- Checking for compression type: $compression_name | signature: $compression_signature | in file: $TEMP_DIR/$KERNEL_FILE | offset = $pos"
+            fi
         fi
-        ((count++))
     done 
 
     [ $compression_name = "bzip" ] && cpio_compressed_start=$((cpio_compressed_start - 4))
     echo "-I- CPIO compression type detected = $compression_name | offset = $cpio_compressed_start"
+
     [ -z $DEBUG ] || echo
 }
 
@@ -159,8 +159,7 @@ function uncompress_cpio()
             echo "-E- No CPIO image found in $inputfile."
         fi
     else
-        INITRAMFS_FILE=$TEMP_DIR/$INITRAMFS_FILE
-        echo "-I- CPIO alread uncompressed."
+        echo "-I- CPIO already uncompressed."
     fi
     [ -z $DEBUG ] || echo
 }
@@ -170,18 +169,19 @@ function expand_cpio_archive()
     [ -z $DEBUG ] || echo "-D- Function: expand_cpio_archive()"
     echo "-I- Expanding CPIO archive: $INITRAMFS_FILE to $INITRAMFS_DIR."
 
-    if [ -e $INITRAMFS_FILE ]; then
+    if [ -e $TEMP_DIR/$INITRAMFS_FILE ]; then
         mkdir $INITRAMFS_DIR
         cd $INITRAMFS_DIR
-        cpio --quiet -i --make-directories --preserve-modification-time --no-absolute-filenames -F $INITRAMFS_FILE 2>/dev/null
+        cpio --quiet -i --make-directories --preserve-modification-time --no-absolute-filenames -F $TEMP_DIR/$INITRAMFS_FILE 2>/dev/null
     fi
     [ -z $DEBUG ] || echo
 }
 
 function clean_up()
 {
-    rm -f $TEMP_DIR/$KERNEL_FILE
-    rm -f $TEMP_DIR/$INITRAMFS_FILE
+    [ -z $DEBUG ] || echo "-D- Deleting $TEMP_DIR/$KERNEL_FILE"; rm -f $TEMP_DIR/$KERNEL_FILE
+    [ -z $DEBUG ] || echo "-D- Deleting $TEMP_DIR/$INITRAMFS_FILE"; rm -f $TEMP_DIR/$INITRAMFS_FILE
+    [ -z $DEBUG ] || echo "-D- Deleting $TEMP_DIR/$INITRAMFS_FILE$file_ext"; rm -f $TEMP_DIR/$INITRAMFS_FILE$file_ext
 }
 
 
