@@ -20,6 +20,9 @@ INITRAMFS_DIR=initramfs_root
 #GET CURRENT DIR
 CURRENT_DIR=`pwd`
 
+# Fixes binary grep not working with raw (high) bytes in UTF-8 locales.
+export LANG=C
+
 function pre_clean()
 {
     [ -z $DEBUG ] || echo "-D- Function: pre_clean()"
